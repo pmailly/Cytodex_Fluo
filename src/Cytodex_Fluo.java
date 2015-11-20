@@ -5,7 +5,6 @@ import Skeletonize3D_.Skeletonize3D_;
 import ij.IJ;
 import ij.ImagePlus;
 import ij.ImageStack;
-//import ij.Macro;
 import ij.WindowManager;
 import ij.gui.*;
 import ij.io.FileSaver;
@@ -46,10 +45,47 @@ public class Cytodex_Fluo implements PlugIn {
     private static double sphXcent, sphYcent, sphFerret;   // Centroid coord and ferret of spheroid
     private static final ResultsTable table = new ResultsTable();
     private static boolean isStack;
-    private static Roi spheroidRoi;
+    private static Roi spheroidRoi, prolifRoi;
     private static String imgOutDir;
     private static String fileNameWithOutExt;
+    private Calibration cal;
+    private static double deltaArea;   // spheroide extension ratio proliferation and spheroide area)
+    private static double spheroidArea, prolifFeret, prolifArea;   // Centroid coord and area of spheroid and proliferation
+    private boolean prolif = false;
     
+    
+    
+    
+    
+    
+ /*
+    find deltaR ratio between spheroid and prolif ferets
+    */
+
+ public void getDeltaArea(ImagePlus img) {
+        
+        if (isStack) img.setSlice(2);
+        Analyzer measure = new Analyzer(img, Measurements.AREA + Measurements.FERET, table);
+        measure.measure();
+        prolifArea = table.getValue("Area",0);
+        prolifFeret = table.getValue("Feret",0);
+	deltaArea = prolifArea / spheroidArea;
+	table.reset();
+        img.getProcessor().setColor(Color.BLACK);
+        if (isStack) {  
+            for (int s = 2; s <= img.getNSlices(); s++) {
+                img.setSlice(s);
+                img.getProcessor().fill(img.getRoi());
+            }
+        }
+        else {
+            img.getProcessor().fill(img.getRoi());
+            img.updateImage();
+        }
+	img.deleteRoi();
+ }
+ 
+ 
 // clear outside selection with true background
     public void clearOutside(ImagePlus img, Roi cropRoi) {
         ImageProcessor ip = img.getProcessor();
@@ -70,11 +106,12 @@ public class Cytodex_Fluo implements PlugIn {
     public void getCentroid(ImagePlus img) {
         
         if (isStack) img.setSlice(2);
-        Analyzer measure = new Analyzer(img,Measurements.CENTROID + Measurements.FERET,table);
+        Analyzer measure = new Analyzer(img,Measurements.CENTROID + Measurements.AREA + Measurements.FERET,table);
         measure.measure();
 	sphXcent = table.getValue("X",0);
 	sphYcent = table.getValue("Y",0);
 	sphFerret = table.getValue("Feret",0);
+        spheroidArea = table.getValue("Area", 0);
 	table.reset();
 	img.getProcessor().setColor(Color.BLACK);
         if (isStack) {  // do not fill DAPI channel do after Band pass filter in findNucleus
@@ -90,7 +127,25 @@ public class Cytodex_Fluo implements PlugIn {
 	img.deleteRoi();
     }
 
-    
+    /**
+     * Find nucleus distance to cytodex
+     * @param x nucleus positions
+     * @param y nucleus positions
+     * @param points roi
+     * @return 
+     */
+    double getClosestDistance(int x, int y, Polygon points) {
+        double distance = Double.MAX_VALUE;
+        for (int i = 0; i < points.npoints; i++) {
+                double dx = points.xpoints[i] - x;
+                double dy = points.ypoints[i] - y;
+                double distance2 = Math.sqrt(dx*dx+dy*dy);
+                if (distance2 < distance) {
+                        distance = distance2;
+                }
+        }
+        return distance;
+    }
 
 /**
      * Returns the location of pixels clockwise along circumference
@@ -211,13 +266,22 @@ public class Cytodex_Fluo implements PlugIn {
         imgMask.flush();
         return(meanDiameters);    
     }
+    
+    private void saveDistances(double [] dist, BufferedWriter outPut, int r) throws IOException {
+        for (int d = 0; d < dist.length; d++) {
+                // write data
+                    outPut.write(fileNameWithOutExt + "\t" + r + "\t" + dist[d] + "\n");
+                    outPut.flush();
+                }  
+    }
    
 /* count nucleus take the coordinates of pixel in nucleus image
 /* if grey value = 0 in branchs mask then nucleus ++
 */
 
-    public Polygon findNucleus(ImagePlus imgNuc, ImagePlus imgBranchs, int spheroid) {
+    public Polygon findNucleus(ImagePlus imgNuc, ImagePlus imgBranchs, int spheroid, BufferedWriter outPut) throws IOException {
 	nbNucleus = 0;
+        double nucleusDist;
         int xCoor, yCoor;
         Duplicator imgDup = new Duplicator();
         ImagePlus imgNucleus = imgDup.run(imgNuc,1,1);
@@ -227,19 +291,25 @@ public class Cytodex_Fluo implements PlugIn {
 // run difference of Gaussians
         IJ.run(imgNucleus,"Difference of Gaussians", "  sigma1=10 sigma2=2 enhance slice");
         imgNucleus.getProcessor().setColor(Color.BLACK);
-        imgNucleus.setRoi(spheroidRoi);
+        if (prolif) imgNucleus.setRoi(prolifRoi);
+        else imgNucleus.setRoi(spheroidRoi);
         imgNucleus.getProcessor().fill(imgNucleus.getRoi());
         imgNucleus.deleteRoi();
 // find maxima
         ImageProcessor ipNucleus = imgNucleus.getProcessor();
         MaximumFinder findMax = new MaximumFinder();
-        Polygon  nucleusPoly = findMax.getMaxima(ipNucleus, 10,false);        
+        Polygon  nucleusPoly = findMax.getMaxima(ipNucleus, 10,false);
         colorNucleus.setColor(Color.BLUE);
         for (int i = 0; i < nucleusPoly.npoints; i++) {
 		xCoor = (int)nucleusPoly.xpoints[i];
 		yCoor = (int)nucleusPoly.ypoints[i];
 		if ((int)imgBranchs.getProcessor().getPixelValue(xCoor,yCoor) == 255) {
                     nbNucleus++;
+                    nucleusDist = getClosestDistance(xCoor, yCoor, spheroidRoi.getPolygon())*imgNuc.getCalibration().pixelWidth;
+                     //Save distances
+                    outPut.write(fileNameWithOutExt + "\t" + spheroid + "\t" + nucleusDist + "\t" + xCoor*imgNuc.getCalibration().pixelWidth 
+                            + "\t" + yCoor*imgNuc.getCalibration().pixelWidth + "\n");
+                    outPut.flush();
                     OvalRoi ptNucleus = new OvalRoi(xCoor, yCoor,4,4);
                     colorNucleus.getProcessor().draw(ptNucleus);
                     colorNucleus.updateAndDraw();                  
@@ -321,7 +391,7 @@ public class Cytodex_Fluo implements PlugIn {
             // write data
             output.write(fileNameWithOutExt + "\t" + spheroid + "\t" + nbSkeleton + "\t" + totalBranches + "\t" + totalLength +
                     "\t" + nbJunctions + "\t" + nbTubes + "\t" + meanTortuosity + "\t" + 
-                    sdTortuosite + "\t" + nbNucleus + "\n");
+                    sdTortuosite + "\t" + nbNucleus + "\t" + sphFerret + "\t" + spheroidArea + "\t" + prolifArea + "\t" + deltaArea + "\n");
             output.flush();
         } catch (IOException ex) {
             Logger.getLogger(Cytodex_Fluo.class.getName()).log(Level.SEVERE, null, ex);
@@ -338,52 +408,70 @@ public class Cytodex_Fluo implements PlugIn {
                 return;
             }           
             String imageDir = IJ.getDirectory("Choose Directory Containing TIF Files...");
+            prolif = IJ.showMessageWithCancel("Proliferation","Compute proliferation ?");
             if (imageDir == null) return;
             File inDir = new File(imageDir);
             String [] imageFile = inDir.list();
             if (imageFile == null) return;
-// create directory to store images
-            imgOutDir = imageDir+"Images/";
-            File imgTmpDir = new File(imgOutDir);
-            if (!imgTmpDir.isDirectory())
-                imgTmpDir.mkdir();
-// write headers for global results
-            FileWriter fwAnalyze;
-            fwAnalyze = new FileWriter(imageDir + "Analyze_skeleton_results.xls",false);
+            
+            FileWriter fwAnalyze = new FileWriter(imageDir + "Analyze_skeleton_results.xls",false);
             BufferedWriter outputAnalyze = new BufferedWriter(fwAnalyze);
-            outputAnalyze.write("Image\t#Spheroids\t#Skeletons\t#Branches\tTotal branch length\t#Junctions\t"
-                    + "#Tubes\tMean Tortuosity\tSD Tortuosity\t#Cells\n");
-            outputAnalyze.flush();
-// write headers for Sholl diameters results
-            FileWriter fwDiameter;
-            fwDiameter = new FileWriter(imageDir + "Analyze_skeleton_diameters_results.xls",false);
+            
+            FileWriter fwDiameter = new FileWriter(imageDir + "Analyze_skeleton_diameters_results.xls",false);
             BufferedWriter outputDiameter = new BufferedWriter(fwDiameter);
-            outputDiameter.write("Image\t#Spheroids\tMean Diameter(d0)\tMean Diameter(d+50)\tMean Diameter(d+100)"
-                    + "\tMean Diameter(d+150)\tMean Diameter(d+200)\tMean Diameter(d+250)\tMean Diameter(d+300)"
-                    +"\tMean Diameter(d+350)\tMean Diameter(d+400)\tMean Diameter(d+450)\tMean Diameter(d+500)\n");
-            outputDiameter.flush();
-
+            
+            FileWriter fwNucleusDistances = new FileWriter(imageDir + "Analyze_distance_results.xls",false);
+            BufferedWriter outputNucleusDistances = new BufferedWriter(fwNucleusDistances);
+            
             Duplicator imgDup = new Duplicator();
+            int index = 0;
             for (int i = 0; i < imageFile.length; i++) {
                 if (imageFile[i].endsWith(".tif")) {
+                    index++;
+                    sphFerret = 0;
+                    spheroidArea = 0;
+                    prolifArea = 0;
+                    deltaArea = 0;
                     String imagePath = imageDir + imageFile[i];
                     Opener imgOpener = new Opener();
                     ImagePlus imgOrg = imgOpener.openImage(imagePath);
                     if (imgOrg.getNSlices() > 1) {
                         isStack = true;
                     }
+                    cal = imgOrg.getCalibration();
                     fileNameWithOutExt = imageFile[i].substring(0, imageFile[i].length() - 4);
+                    // write headers
+                    if (index == 1) {
+                        // create directory to store images
+                        imgOutDir = imageDir+"Images/";
+                        File imgTmpDir = new File(imgOutDir);
+                        if (!imgTmpDir.isDirectory())
+                            imgTmpDir.mkdir();
 
-//convert to 8 bytes
-//                    if (isStack) {
-//                        new StackConverter(imgOrg).convertToGray8();
-//                    }
-//                    else {
-//                        new ImageConverter(imgOrg).convertToGray8();
-//                    }
-                    
+            // write headers for global results
+
+                        outputAnalyze.write("Image\t#Spheroids\t#Skeletons\t#Branches\tTotal branch length ("+cal.getUnit()+")\t#Junctions\t"
+                                + "#Tubes\tMean Tortuosity\tSD Tortuosity\t#Cells\tSpheroid D\tSpheroid Area\tProlif Area\tdelta Area\n");
+                        outputAnalyze.flush();
+
+            // write headers for Sholl diameters results
+
+                        outputDiameter.write("Image\t#Spheroids\tMean Diameter(0"+cal.getUnit()+")\tMean Diameter(+50"+cal.getUnit()+")\tMean Diameter(+100"+cal.getUnit()+")"
+                                + "\tMean Diameter(+150"+cal.getUnit()+")\tMean Diameter(+200"+cal.getUnit()+")\tMean Diameter(+250"+cal.getUnit()+")\tMean Diameter(+300"+cal.getUnit()+")"
+                                +"\tMean Diameter(+350"+cal.getUnit()+")\tMean Diameter(+400"+cal.getUnit()+")\tMean Diameter(+450"+cal.getUnit()+")\tMean Diameter(+500"+cal.getUnit()+")\n");
+                        outputDiameter.flush();
+
+            // write headers for nucleus distances
+
+                        outputNucleusDistances.write("Image\t#Cytodex\tDistance ("+cal.getUnit()+"\tX\tY\n");
+                        outputNucleusDistances.flush();
+                    }
+                    // auto contrast                    
+                    for ( int s = 1; s <= imgOrg.getNSlices(); s++) {
+                        imgOrg.setSlice(s);
+                        IJ.run(imgOrg,"Enhance Contrast", "saturated=0.35");
+                    }
                     imgOrg.show();
-                    IJ.run("Enhance Contrast", "saturated=0.35");
                     if (RoiManager.getInstance() != null) RoiManager.getInstance().close();
                     RoiManager rm = new RoiManager();
                     new WaitForUserDialog("Select part(s) of image to analyze\nPress t to add selection to the ROI manager.").show();
@@ -415,7 +503,13 @@ public class Cytodex_Fluo implements PlugIn {
                         spheroidRoi = imgCrop.getRoi();
 // remove spheroid			
                         getCentroid(imgCrop);
-
+                        
+// calculate deltaR	                     
+                        if (prolif) {
+                            new WaitForUserDialog("Outline the proliferation").show(); 		// ask for outline proliferation
+                            prolifRoi = imgCrop.getRoi();
+                            getDeltaArea(imgCrop);
+                        }
 
 // create image for branch mask
                         ImagePlus imgBranchsMask = imgDup.run(imgCrop,imgCrop.getNSlices(),imgCrop.getNSlices());
@@ -451,9 +545,11 @@ public class Cytodex_Fluo implements PlugIn {
                         // Check if no branches
                         ImageStatistics stats = ImageStatistics.getStatistics(ipBranchsMask, ImageStatistics.MIN_MAX,imgBranchsMask.getCalibration());
                         
-                        if (stats.max == 0) { // no branches
+                        if (stats.max == stats.min ) { // no branches
 // write skeleton data with zero
-                            outputAnalyze.write(fileNameWithOutExt + "\t" + (r+1) + "\t0\t0\t0\t0\t0\t0\t0\t0\n");
+                            // write skeleton data with zero
+                            outputAnalyze.write(fileNameWithOutExt + "\t" + (r+1) + "\t0\t0\t0\t0\t0\t0\t0\t" +
+                                     nbNucleus + "\t" + sphFerret + "\t" + spheroidArea + "\t" + prolifArea + "\t" + deltaArea + "\n");         
                             outputAnalyze.flush();                           
 // write data in diameter file with zero
                             outputDiameter.write(fileNameWithOutExt + "\t" + (r+1) + "\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0\n");
@@ -474,7 +570,7 @@ public class Cytodex_Fluo implements PlugIn {
     // find nucleus/spheroid                        
                             if (isStack) {
                                 Polygon nucleusCoord = new Polygon();
-                                nucleusCoord = findNucleus(imgCrop, imgBranchsMask, r);
+                                nucleusCoord = findNucleus(imgCrop, imgBranchsMask, r, outputNucleusDistances);
                             }
                             imgCrop.close();
                             imgCrop.flush();
