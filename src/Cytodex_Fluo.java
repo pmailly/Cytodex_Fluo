@@ -4,6 +4,7 @@
 import Skeletonize3D_.Skeletonize3D_;
 import ij.IJ;
 import ij.ImagePlus;
+import ij.ImageStack;
 //import ij.Macro;
 import ij.WindowManager;
 import ij.gui.*;
@@ -16,7 +17,6 @@ import ij.plugin.Duplicator;
 import ij.plugin.PlugIn;
 import ij.plugin.filter.Analyzer;
 import ij.plugin.filter.BackgroundSubtracter;
-import ij.plugin.filter.DifferenceOfGaussians;
 import ij.plugin.filter.GaussianBlur;
 import ij.plugin.filter.MaximumFinder;
 import ij.plugin.filter.RankFilters;
@@ -25,7 +25,6 @@ import ij.process.AutoThresholder;
 import ij.process.ImageConverter;
 import ij.process.ImageProcessor;
 import ij.process.ImageStatistics;
-import ij.process.StackConverter;
 import ij.util.ArrayUtil;
 import java.awt.Color;
 import java.awt.Polygon;
@@ -48,8 +47,9 @@ public class Cytodex_Fluo implements PlugIn {
     private static final ResultsTable table = new ResultsTable();
     private static boolean isStack;
     private static Roi spheroidRoi;
+    private static String imgOutDir;
+    private static String fileNameWithOutExt;
     
-
 // clear outside selection with true background
     public void clearOutside(ImagePlus img, Roi cropRoi) {
         ImageProcessor ip = img.getProcessor();
@@ -150,15 +150,17 @@ public class Cytodex_Fluo implements PlugIn {
             IJ.wait(100);
         }
         ImagePlus imgLocalThickness = WindowManager.getImage("Branches_Mask_LocThk");
+        
         imgLocalThickness.setCalibration(cal);
         dx = (cx<=wdth/2) ? (cx-wdth) : cx;
         dy = (cy<=hght/2) ? (cy-hght) : cy;
         maxEndRadius = Math.sqrt(dx*dx + dy*dy);
         stepRadius = incStep;
-
+// save image map
+        FileSaver imgLoth = new FileSaver(imgLocalThickness);
+        imgLoth.saveAsTiff(imgOutDir+fileNameWithOutExt+"_Map.tif");
 // Calculate how many samples will be taken
         final int size = (int) ((maxEndRadius-startRadius)/stepRadius)+1;
-//  IJ.log(sphFerret+" ,"+startRadius+" ,"+stepRadius+" ,"+size);
         
 // Create arrays for radii (in physical units) and intersection counts
         radii = new double[size];
@@ -171,16 +173,16 @@ public class Cytodex_Fluo implements PlugIn {
        
 // compute points on circle every step microns and store in array
         for (int r = 0; r < radii.length; r++) {
+            diameters.clear();
             ptCircle = BresenhamCircle((int)cal.getRawX(cx), (int)cal.getRawY(cy), (int)(radii[r]/cal.pixelWidth));            
-//            Polygon polygon = new Polygon();
-//            for (int i = 0; i < ptCircle.size(); i++) {
-//                polygon.addPoint(ptCircle.get(i).x, ptCircle.get(i).y);
-//            }
-//            PolygonRoi circle = new PolygonRoi(polygon,PolygonRoi.POLYLINE);
-//            imgLocalThickness.setRoi(circle, true);
-//           new WaitForUserDialog("wait enlarge").show();
+            Polygon polygon = new Polygon();
+            for (int i = 0; i < ptCircle.size(); i++) {
+                polygon.addPoint(ptCircle.get(i).x, ptCircle.get(i).y);
+            }
+            
             for (int i = 0; i < ptCircle.size(); i++) {
                 // check if pixel inside image
+                
                 int x = ptCircle.get(i).x;
                 int y = ptCircle.get(i).y;
                 if (((x > 0) || (x < wdth)) && ((y > 0) || (y < hght))) {
@@ -214,28 +216,16 @@ public class Cytodex_Fluo implements PlugIn {
 /* if grey value = 0 in branchs mask then nucleus ++
 */
 
-    public Polygon findNucleus(ImagePlus imgCrop, ImagePlus imgBranchs, String dir , String fileName, int spheroid) {
+    public Polygon findNucleus(ImagePlus imgNuc, ImagePlus imgBranchs, int spheroid) {
 	nbNucleus = 0;
         int xCoor, yCoor;
-
-        ImagePlus imgNucleus = new Duplicator().run(imgCrop, 1, 1);
-        ImagePlus colorNucleus = imgNucleus.duplicate();
+        Duplicator imgDup = new Duplicator();
+        ImagePlus imgNucleus = imgDup.run(imgNuc,1,1);
+        ImagePlus colorNucleus = imgNuc.duplicate();
         ImageConverter imgConv = new ImageConverter(colorNucleus);
         imgConv.convertToRGB();
-// run bandpass filter without dialog        
-//        Thread thread = Thread.currentThread();  
-//        thread.setName("Run$_create_image");
-//        String options = "filter_large=5 filter_small=3 suppress=None tolerance=5 autoscale saturate";
-//        String original_name = thread.getName();       
-//	thread.setName("Run$_my_batch_process");
-//        Macro.setOptions(Thread.currentThread(), options);           // select DAPI channel
-//        IJ.runPlugIn(imgNucleus, "ij.plugin.filter.FFTFilter", "");
-//        thread.setName(original_name);
-//        Macro.setOptions(thread, null);
-        IJ.run("Auto Local Threshold", "method=Phansalkar radius=15 parameter_1=0 parameter_2=0 white");
 // run difference of Gaussians
-        double sigma1 = 10, sigma2 = 2;
-        DifferenceOfGaussians.run(imgNucleus.getProcessor(), sigma1, sigma2);
+        IJ.run(imgNucleus,"Difference of Gaussians", "  sigma1=10 sigma2=2 enhance slice");
         imgNucleus.getProcessor().setColor(Color.BLACK);
         imgNucleus.setRoi(spheroidRoi);
         imgNucleus.getProcessor().fill(imgNucleus.getRoi());
@@ -244,8 +234,7 @@ public class Cytodex_Fluo implements PlugIn {
         ImageProcessor ipNucleus = imgNucleus.getProcessor();
         MaximumFinder findMax = new MaximumFinder();
         Polygon  nucleusPoly = findMax.getMaxima(ipNucleus, 10,false);        
-        
-        colorNucleus.setColor(Color.YELLOW);
+        colorNucleus.setColor(Color.BLUE);
         for (int i = 0; i < nucleusPoly.npoints; i++) {
 		xCoor = (int)nucleusPoly.xpoints[i];
 		yCoor = (int)nucleusPoly.ypoints[i];
@@ -257,13 +246,11 @@ public class Cytodex_Fluo implements PlugIn {
                 }
 	}
         FileSaver imgSave = new FileSaver(colorNucleus);
-        imgSave.saveAsTiff(dir+fileName+"_Crop_"+spheroid+"_nucleus.tif");
+        imgSave.saveAsTiff(imgOutDir+fileNameWithOutExt+"_Crop_"+spheroid+"_nucleus.tif");
         colorNucleus.close();
+        imgNucleus.changes = false;
         imgNucleus.close();
         imgNucleus.flush();
-        imgCrop.changes = false;
-        imgCrop.close();
-        imgCrop.flush();
         spheroidRoi = null;
         return nucleusPoly;
     }
@@ -288,7 +275,7 @@ public class Cytodex_Fluo implements PlugIn {
     }
 
     // Calculate lenght of branches after skeletonize
-    public void analyzeSkel (ImagePlus img, int spheroid, BufferedWriter output, String fileNameNoExt) {
+    public void analyzeSkel (ImagePlus img, int spheroid, BufferedWriter output) {
 	int nbSkeleton;             // number of skeleton
         double totalLength = 0;     // total branch lenght/spheroid
         int totalBranches = 0;   // total number of branches/spheroid
@@ -305,6 +292,12 @@ public class Cytodex_Fluo implements PlugIn {
         nbSkeleton = skeletonResults.getNumOfTrees();
         int[] branchNumbers = skeletonResults.getBranches();
         int[] junctionNumbers = skeletonResults.getJunctions();
+        // save labelled skeletons
+        ImageStack labSkel = analyzeSkeleton.getLabeledSkeletons();
+        ImagePlus imgLab = new ImagePlus("Labelled skeleton",labSkel);
+        IJ.run(imgLab,"Fire","");
+        FileSaver imgLab_save = new FileSaver(imgLab);
+        imgLab_save.saveAsTiff(imgOutDir+fileNameWithOutExt+"_labSkel.tif");
         for (int b = 0; b < branchNumbers.length; b++) { 
                 totalBranches += branchNumbers[b];
                 nbJunctions += junctionNumbers[b];
@@ -326,7 +319,7 @@ public class Cytodex_Fluo implements PlugIn {
        
         try {
             // write data
-            output.write(fileNameNoExt + "\t" + spheroid + "\t" + nbSkeleton + "\t" + totalBranches + "\t" + totalLength +
+            output.write(fileNameWithOutExt + "\t" + spheroid + "\t" + nbSkeleton + "\t" + totalBranches + "\t" + totalLength +
                     "\t" + nbJunctions + "\t" + nbTubes + "\t" + meanTortuosity + "\t" + 
                     sdTortuosite + "\t" + nbNucleus + "\n");
             output.flush();
@@ -350,7 +343,7 @@ public class Cytodex_Fluo implements PlugIn {
             String [] imageFile = inDir.list();
             if (imageFile == null) return;
 // create directory to store images
-            String imgOutDir = imageDir+"Images/";
+            imgOutDir = imageDir+"Images/";
             File imgTmpDir = new File(imgOutDir);
             if (!imgTmpDir.isDirectory())
                 imgTmpDir.mkdir();
@@ -379,15 +372,16 @@ public class Cytodex_Fluo implements PlugIn {
                     if (imgOrg.getNSlices() > 1) {
                         isStack = true;
                     }
-                    String fileNameWithOutExt = imageFile[i].substring(0, imageFile[i].length() - 4);
+                    fileNameWithOutExt = imageFile[i].substring(0, imageFile[i].length() - 4);
 
 //convert to 8 bytes
-                        if (isStack) {
-                            new StackConverter(imgOrg).convertToGray8();
-                        }
-                        else {
-                            new ImageConverter(imgOrg).convertToGray8();
-                        }
+//                    if (isStack) {
+//                        new StackConverter(imgOrg).convertToGray8();
+//                    }
+//                    else {
+//                        new ImageConverter(imgOrg).convertToGray8();
+//                    }
+                    
                     imgOrg.show();
                     IJ.run("Enhance Contrast", "saturated=0.35");
                     if (RoiManager.getInstance() != null) RoiManager.getInstance().close();
@@ -424,8 +418,7 @@ public class Cytodex_Fluo implements PlugIn {
 
 
 // create image for branch mask
-                       ImagePlus imgBranchsMask = imgDup.run(imgCrop,2,imgCrop.getNSlices());
-                       
+                        ImagePlus imgBranchsMask = imgDup.run(imgCrop,imgCrop.getNSlices(),imgCrop.getNSlices());
 
 // threshold image                        
                         ImageProcessor ipBranchsMask = imgBranchsMask.getProcessor();
@@ -439,7 +432,6 @@ public class Cytodex_Fluo implements PlugIn {
                                 double minThreshold = ipBranchsMask.getMinThreshold();
                                 double maxThreshold = ipBranchsMask.getMaxThreshold();
                                 ipBranchsMask.setThreshold(minThreshold,maxThreshold,1);
-                                
                                 imgBranchsMask.updateAndDraw();
                                 WindowManager.setTempCurrentImage(imgBranchsMask);
                                 IJ.run("Convert to Mask");
@@ -452,7 +444,6 @@ public class Cytodex_Fluo implements PlugIn {
                             double minThreshold = ipBranchsMask.getMinThreshold();
                             double maxThreshold = ipBranchsMask.getMaxThreshold();
                             ipBranchsMask.setThreshold(minThreshold,maxThreshold,1);
-                            
                             imgBranchsMask.updateAndDraw();
                             WindowManager.setTempCurrentImage(imgBranchsMask);
                             IJ.run("Convert to Mask");
@@ -460,7 +451,7 @@ public class Cytodex_Fluo implements PlugIn {
                         // Check if no branches
                         ImageStatistics stats = ImageStatistics.getStatistics(ipBranchsMask, ImageStatistics.MIN_MAX,imgBranchsMask.getCalibration());
                         
-                        if (stats.max != 255) { // no branches
+                        if (stats.max == 0) { // no branches
 // write skeleton data with zero
                             outputAnalyze.write(fileNameWithOutExt + "\t" + (r+1) + "\t0\t0\t0\t0\t0\t0\t0\t0\n");
                             outputAnalyze.flush();                           
@@ -483,7 +474,7 @@ public class Cytodex_Fluo implements PlugIn {
     // find nucleus/spheroid                        
                             if (isStack) {
                                 Polygon nucleusCoord = new Polygon();
-                                nucleusCoord = findNucleus(imgCrop, imgBranchsMask, imgOutDir, fileNameWithOutExt, r);
+                                nucleusCoord = findNucleus(imgCrop, imgBranchsMask, r);
                             }
                             imgCrop.close();
                             imgCrop.flush();
@@ -514,7 +505,7 @@ public class Cytodex_Fluo implements PlugIn {
                             if (imgSkel.getNSlices() > 1) imgSkel_save.saveAsTiffStack(imgOutDir+fileNameWithOutExt+"_Crop"+r+"_Skel.tif");
                             else imgSkel_save.saveAsTiff(imgOutDir+fileNameWithOutExt+"_Crop"+r+"_Skel.tif");
 
-                            analyzeSkel(imgSkel,r+1,outputAnalyze,fileNameWithOutExt);  
+                            analyzeSkel(imgSkel,r+1,outputAnalyze);  
 
     // compute mean branch diameter
                             double[] meanDiameter = localThickness(imgBranchsMask, imgSkel);
