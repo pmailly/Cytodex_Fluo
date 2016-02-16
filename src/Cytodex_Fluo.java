@@ -32,10 +32,10 @@ import static java.lang.Math.sqrt;
 import java.util.ArrayList;
 import java.util.logging.Level;
 import java.util.logging.Logger;
-import skeleton_analysis.AnalyzeSkeleton_;
-import skeleton_analysis.Edge;
-import skeleton_analysis.Point;
-import skeleton_analysis.SkeletonResult;
+import sc.fiji.analyzeSkeleton.AnalyzeSkeleton_;
+import sc.fiji.analyzeSkeleton.Edge;
+import sc.fiji.analyzeSkeleton.Point;
+import sc.fiji.analyzeSkeleton.SkeletonResult;
 
 
 public class Cytodex_Fluo implements PlugIn {
